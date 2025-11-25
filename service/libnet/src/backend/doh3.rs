@@ -35,6 +35,7 @@ pub enum DoH3BackendError {
 #[derive(Debug, Clone)]
 struct DoH3Server {
     domain_name: String,
+    path: Option<String>,
     resolved_address: SocketAddr,
 }
 
@@ -46,26 +47,39 @@ struct DoH3Request {
 }
 
 impl DoH3Request {
-    pub fn new(server_name: &str, request_packet: &[u8], payload: &[u8]) -> Self {
+    pub fn new(server_name: &str, server_path: Option<String>, request_packet: &[u8], payload: &[u8]) -> Self {
+        info!("{}", &BASE64_STANDARD_NO_PAD.encode(payload));
         Self {
             creation_time: std::time::Instant::now(),
             request_packet: request_packet.to_vec(),
-            payload: Self::make_dns_request_header(server_name, &payload),
+            payload: Self::make_dns_request_header(server_name, server_path, payload),
         }
     }
 
-    fn make_dns_request_header(server_name: &str, dns_payload: &[u8]) -> Vec<Header> {
-        vec![
-            Header::new(b":method", b"GET"),
-            Header::new(b":scheme", b"https"),
-            Header::new(b":authority", server_name.as_bytes()),
-            Header::new(
-                b":path",
-                ("/dns-query?dns=".to_owned() + &BASE64_STANDARD_NO_PAD.encode(dns_payload))
-                    .as_bytes(),
-            ),
-            Header::new(b"accept", b"application/dns-message"),
-        ]
+    fn make_dns_request_header(server_name: &str, server_path: Option<String>, dns_payload: &[u8]) -> Vec<Header> {
+        match server_path {
+            Some(path) => {
+                vec![
+                    Header::new(b":method", format!("GET {}/dns-query?dns={} HTTP/1.1", path, &BASE64_STANDARD_NO_PAD.encode(dns_payload)).as_bytes()),
+                    Header::new(b":scheme", b"https"),
+                    Header::new(b":host", server_name.as_bytes()),
+                    Header::new(b"accept", b"application/dns-message"),
+                ]
+            },
+            None => {
+                vec![
+                    Header::new(b":method", b"GET"),
+                    Header::new(b":scheme", b"https"),
+                    Header::new(b":authority", server_name.as_bytes()),
+                    Header::new(
+                        b":path",
+                        ("/dns-query?dns=".to_owned() + &BASE64_STANDARD_NO_PAD.encode(dns_payload))
+                            .as_bytes(),
+                    ),
+                    Header::new(b"accept", b"application/dns-message"),
+                ]
+            },
+        }
     }
 }
 
@@ -291,8 +305,8 @@ impl DoH3Backend {
     pub fn new(servers: &Vec<Arc<NativeDnsServer>>) -> Result<Self, DoH3BackendError> {
         let mut connections: HashMap<String, DoH3ServerConnectionContainer> = HashMap::new();
         for (index, server) in servers.iter().enumerate() {
-            let server_name = match &server.get_type() {
-                NativeDnsServerType::DoH3(server_name) => server_name.clone(),
+            let (server_name, server_path) = match &server.get_type() {
+                NativeDnsServerType::DoH3(server_name, server_path) => (server_name.clone(), server_path.clone()),
                 NativeDnsServerType::Standard => {
                     error!(
                         "new: DoH3 backend was given a standard DNS server! This should never happen!"
@@ -326,6 +340,7 @@ impl DoH3Backend {
             let connection = match DoH3ServerConnectionContainer::new(
                 DoH3Server {
                     domain_name: server_name.clone(),
+                    path: server_path.clone(),
                     resolved_address: resolved_socket_address,
                 },
                 Token(index as usize),
@@ -337,7 +352,7 @@ impl DoH3Backend {
                 }
             };
 
-            connections.insert(server_name, connection);
+            connections.insert(format!("{}{}", server_name, server_path.unwrap_or(String::from(""))), connection);
         }
 
         if connections.is_empty() {
@@ -463,6 +478,7 @@ impl DnsBackend for DoH3Backend {
 
         connection.request_queue.push_back(DoH3Request::new(
             &connection.server.domain_name,
+            connection.server.path.clone(),
             request_packet,
             packet,
         ));

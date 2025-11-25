@@ -272,7 +272,7 @@ impl Vpn {
             };
 
         let is_doh3 = dns_servers.iter().any(|server| match server.get_type() {
-            NativeDnsServerType::DoH3(_) => true,
+            NativeDnsServerType::DoH3(_, _) => true,
             NativeDnsServerType::Standard => false,
         });
         let mut backend: Box<dyn DnsBackend> = if is_doh3 {
@@ -303,11 +303,9 @@ impl Vpn {
                 .iter()
                 .filter_map(|server| {
                     if is_doh3 {
-                        match &server.get_type() {
-                            NativeDnsServerType::DoH3(server_name) => {
-                                Some(server_name.clone().into_bytes())
-                            }
-                            NativeDnsServerType::Standard => None,
+                        match server.get_type().get_doh3_address() {
+                            Some(address) => Some(address.into_bytes()),
+                            None => None,
                         }
                     } else {
                         Some(server.get_address())

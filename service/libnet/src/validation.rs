@@ -26,11 +26,20 @@ use crate::{VpnController, VpnResult, cache::DnsCache};
 pub enum NativeDnsServerType {
     /// The DNS server is a DoH3 server (e.g. https://dns.google/dns-query).
     ///
-    /// For convenience, the sanitized name (e.g. dns.google) is held in this enum.
-    DoH3(String),
+    /// The sanitized name (e.g. dns.google) and optionally a path (e.g. /<UUID>) are held in this enum.
+    DoH3(String, Option<String>),
 
     /// The DNS server is a standard DNS server (e.g. 8.8.8.8)
     Standard,
+}
+
+impl NativeDnsServerType {
+    pub fn get_doh3_address(&self) -> Option<String> {
+        match self {
+            NativeDnsServerType::DoH3(server_name, server_path) => Some(format!("{server_name}{}", server_path.clone().unwrap_or(String::from("")))),
+            NativeDnsServerType::Standard => None,
+        }
+    }
 }
 
 #[derive(uniffi::Object)]
@@ -76,14 +85,16 @@ pub enum ValidateDnsResult {
 
 struct DnsRequester {
     server_name: String,
+    server_path: Option<String>,
     resolved_address: Option<Vec<u8>>,
     result_id: u8,
 }
 
 impl DnsRequester {
-    fn new(server_name: String, pipe: Arc<RwLock<pipe::Sender>>, result_id: u8) -> Self {
+    fn new(server_name: String, server_path: Option<String>, pipe: Arc<RwLock<pipe::Sender>>, result_id: u8) -> Self {
         let requester = DnsRequester {
             server_name: server_name.to_string(),
+            server_path,
             resolved_address: None,
             result_id,
         };
@@ -201,10 +212,10 @@ pub fn validate_dns_servers(
         let stripped_prefix_server = unvalidated_server
             .strip_prefix("https://")
             .unwrap_or(&unvalidated_server);
-        let stripped_server = if let Some(index) = stripped_prefix_server.find("/") {
-            &stripped_prefix_server[..index]
+        let (stripped_server, server_path) = if let Some(index) = stripped_prefix_server.find("/") {
+            (&stripped_prefix_server[..index], Some((&stripped_prefix_server[index..]).to_string()))
         } else {
-            stripped_prefix_server
+            (stripped_prefix_server, None)
         };
 
         if stripped_server.is_empty() {
@@ -219,13 +230,13 @@ pub fn validate_dns_servers(
                 IpAddr::V4(ipv4_addr) => {
                     validated_servers.push(Arc::new(NativeDnsServer::new(
                         ipv4_addr.octets().to_vec(),
-                        NativeDnsServerType::DoH3(stripped_server.to_string()),
+                        NativeDnsServerType::DoH3(stripped_server.to_string(), server_path),
                     )));
                 }
                 IpAddr::V6(ipv6_addr) => {
                     validated_servers.push(Arc::new(NativeDnsServer::new(
                         ipv6_addr.octets().to_vec(),
-                        NativeDnsServerType::DoH3(stripped_server.to_string()),
+                        NativeDnsServerType::DoH3(stripped_server.to_string(), server_path),
                     )));
                 }
             }
@@ -234,6 +245,7 @@ pub fn validate_dns_servers(
 
         let dns_requester = DnsRequester::new(
             stripped_server.to_owned(),
+            server_path,
             sender_holder.clone(),
             index as u8,
         );
@@ -395,7 +407,7 @@ pub fn validate_dns_servers(
             dns_cache.put_answer(&dns_requester.server_name, &address);
             validated_servers.push(Arc::new(NativeDnsServer::new(
                 address,
-                NativeDnsServerType::DoH3(dns_requester.server_name.clone()),
+                NativeDnsServerType::DoH3(dns_requester.server_name.clone(), dns_requester.server_path.clone()),
             )));
         } else {
             trace!(
